@@ -1,0 +1,8 @@
+.venv/
+data/videos/
+data/frames/
+data/dataset/raw/
+outputs/tracked_videos/
+__pycache__/
+*.pyc
+.env

@@ -1,0 +1,9 @@
+names:
+- player
+- goalkeeper
+- referee
+- ball
+nc: 4
+test: data/dataset/merged/test/images
+train: data/dataset/merged/train/images
+val: data/dataset/merged/valid/images
