@@ -1,8 +1,30 @@
+# Entorno Python
 .venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Vídeos y frames (demasiado grandes para git)
 data/videos/
 data/frames/
 data/dataset/raw/
+data/dataset/merged/
+
+# Pesos de modelos
+*.pt
+models/tmp_v4/
+models/weights/
+runs/
+yolov8m.pt
+
+# Outputs (vídeos generados)
 outputs/tracked_videos/
-__pycache__/
-*.pyc
-.env
+outputs/metrics/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Sistema
+.DS_Store
+Thumbs.db

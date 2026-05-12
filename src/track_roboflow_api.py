@@ -1,14 +1,10 @@
 """
-Detección + tracking sobre vídeo táctico con ByteTrack (supervision).
-
-Modos de inferencia (controlar con USE_LOCAL_MODEL):
-  True  → ultralytics YOLO local (models/football-tactical-v4.pt) — sin coste de API
-  False → Roboflow Inference API (football-tactical/4)             — requiere créditos
+Detección + tracking sobre vídeo táctico usando el modelo Roboflow
+football-tactical/2 y ByteTrack (supervision).
 
 Incluye:
 - Interpolación de posición del balón (abdullahtarek/football-analysis)
 - Clasificación de equipo: SigLIP → UMAP → KMeans, cacheado por track_id
-- Threshold diferenciado: CONF_THRESH jugadores/árbitros, CONF_THRESH_BALL balón
 
 Uso: python src/track.py [--input PATH] [--output PATH] [--conf FLOAT]
 """
@@ -23,38 +19,26 @@ import cv2
 import numpy as np
 import pandas as pd
 import supervision as sv
-import torch
 from dotenv import load_dotenv
+from inference_sdk import InferenceHTTPClient
 
 sys.path.insert(0, str(Path(__file__).parent))
 from team_assigner import TeamClassifier
 
 load_dotenv()
 
-# ── Alternar entre inferencia local y API ────────────────────────────────────
-USE_LOCAL_MODEL = True
-
-# Local
-LOCAL_MODEL_PATH = Path("models/football-tactical-v4.pt")
-
-# API (solo si USE_LOCAL_MODEL = False)
-API_KEY  = os.getenv("ROBOFLOW_API_KEY")
-MODEL_ID = "football-tactical/4"
-API_URL  = "https://serverless.roboflow.com"
-
-# ── Configuración general ─────────────────────────────────────────────────────
+API_KEY      = os.getenv("ROBOFLOW_API_KEY")
+MODEL_ID     = "football-tactical/4"
 INPUT_VIDEO  = Path("data/videos/tactico_01.mp4")
 OUTPUT_DIR   = Path("outputs/tracked_videos")
 OUTPUT_VIDEO = OUTPUT_DIR / "tactico_01_tracked.mp4"
-CONF_THRESH      = 0.35   # jugadores, árbitros, porteros
-CONF_THRESH_BALL = 0.05   # balón: umbral muy agresivo para no perdérselo
+CONF_THRESH       = 0.35   # jugadores, árbitros, porteros
+CONF_THRESH_BALL  = 0.05   # balón: umbral muy agresivo para no perdérselo
 
 # Paleta: class_id 0→equipo A (verde), 1→equipo B (rojo), 2→árbitro/portero (amarillo)
 COLOR_PALETTE = sv.ColorPalette.from_hex(["#00FF00", "#FF4444", "#FFFF00"])
 BALL_COLOR    = sv.Color.from_hex("#FFFFFF")
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def interpolate_ball(ball_bboxes: list) -> list:
     """Rellena posiciones de balón faltantes con interpolación lineal."""
@@ -69,51 +53,12 @@ def interpolate_ball(ball_bboxes: list) -> list:
     return result
 
 
-def _infer_local(model, frame: np.ndarray) -> sv.Detections:
-    """Inferencia con ultralytics YOLO local. Retorna todas las detecciones (conf ≥ 0)."""
-    results = model.predict(frame, conf=0.01, verbose=False)[0]
-    return sv.Detections.from_ultralytics(results)
-
-
-def _infer_api(client, frame: np.ndarray) -> sv.Detections:
-    """Inferencia vía Roboflow Inference API."""
-    results = client.infer(frame, model_id=MODEL_ID)
-    return sv.Detections.from_inference(results)
-
-
-def _apply_conf_filter(detections: sv.Detections, conf: float) -> sv.Detections:
-    """Threshold diferenciado: CONF_THRESH_BALL para balón, conf para el resto."""
-    classes   = detections.data.get("class_name", np.array([]))
-    ball_mask = np.array([c == "ball" for c in classes])
-    keep      = (
-        (~ball_mask & (detections.confidence >= conf)) |
-        ( ball_mask & (detections.confidence >= CONF_THRESH_BALL))
-    )
-    return detections[keep]
-
-
-# ── Pipeline principal ────────────────────────────────────────────────────────
-
 def run(input_path: Path, output_path: Path, conf: float,
         max_frames: int = 0, start_sec: int = 0) -> None:
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Inicializar backend de inferencia
-    if USE_LOCAL_MODEL:
-        from ultralytics import YOLO
-        model  = YOLO(str(LOCAL_MODEL_PATH))
-        model.to(device)
-        infer  = lambda frame: _infer_local(model, frame)
-        print(f"Modo: LOCAL — {LOCAL_MODEL_PATH.name} en {device}")
-    else:
-        from inference_sdk import InferenceHTTPClient
-        client = InferenceHTTPClient(api_url=API_URL, api_key=API_KEY)
-        infer  = lambda frame: _infer_api(client, frame)
-        print(f"Modo: API   — {MODEL_ID}")
-
+    client     = InferenceHTTPClient(api_url="https://serverless.roboflow.com", api_key=API_KEY)
     tracker    = sv.ByteTrack()
-    classifier = TeamClassifier()
+    classifier = TeamClassifier()   # detecta CUDA automáticamente con torch
 
     cap   = cv2.VideoCapture(str(input_path))
     w     = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -125,11 +70,11 @@ def run(input_path: Path, output_path: Path, conf: float,
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_sec * fps))
 
     limit = max_frames if max_frames else (total - int(start_sec * fps))
-    print(f"Pasada 1/2 — inferencia ({limit} frames desde seg {start_sec})...")
+    print(f"Pasada 1/2 — inferencia API ({limit} frames desde seg {start_sec})...")
 
     frames_buf: list[np.ndarray]        = []
     detections_buf: list[sv.Detections] = []
-    team_buf: list[dict[int, int]]      = []
+    team_buf: list[dict[int, int]]      = []   # {track_id: team_id} por frame
     ball_bboxes: list                   = []
     fitted = False
 
@@ -139,8 +84,17 @@ def run(input_path: Path, output_path: Path, conf: float,
         if not ret:
             break
 
-        detections = infer(frame)
-        detections = _apply_conf_filter(detections, conf)
+        results    = client.infer(frame, model_id=MODEL_ID)
+        detections = sv.Detections.from_inference(results)
+
+        # Threshold diferenciado: balón más permisivo para no perdérselo
+        raw_classes = detections.data.get("class_name", np.array([]))
+        ball_mask   = np.array([c == "ball" for c in raw_classes])
+        conf_mask   = (
+            (~ball_mask & (detections.confidence >= conf)) |
+            ( ball_mask & (detections.confidence >= CONF_THRESH_BALL))
+        )
+        detections = detections[conf_mask]
         detections = tracker.update_with_detections(detections)
 
         classes = detections.data.get("class_name", np.array([]))
@@ -195,8 +149,8 @@ def run(input_path: Path, output_path: Path, conf: float,
         str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
     )
 
-    ellipse_ann  = sv.EllipseAnnotator(color=COLOR_PALETTE, thickness=2)
-    label_ann    = sv.LabelAnnotator(
+    ellipse_ann = sv.EllipseAnnotator(color=COLOR_PALETTE, thickness=2)
+    label_ann   = sv.LabelAnnotator(
         color=COLOR_PALETTE,
         text_color=sv.Color.BLACK,
         text_scale=0.45,
@@ -219,11 +173,11 @@ def run(input_path: Path, output_path: Path, conf: float,
                     detections.xyxy[j] = np.array(ball_bbox)
                     break
 
-        classes       = detections.data.get("class_name", np.array([]))
-        frame_teams   = team_buf[i]
-        n             = len(detections)
+        classes     = detections.data.get("class_name", np.array([]))
+        frame_teams = team_buf[i]
+        n           = len(detections)
         new_class_ids = np.zeros(n, dtype=int)
-        labels        = []
+        labels = []
 
         for j, cls in enumerate(classes):
             tid = int(detections.tracker_id[j]) if detections.tracker_id is not None else -1
@@ -244,9 +198,9 @@ def run(input_path: Path, output_path: Path, conf: float,
 
         detections.class_id = new_class_ids
 
-        ball_mask       = np.array([c == "ball" for c in classes])
-        non_ball_det    = detections[~ball_mask]
-        ball_det        = detections[ball_mask]
+        ball_mask    = np.array([c == "ball" for c in classes])
+        non_ball_det = detections[~ball_mask]
+        ball_det     = detections[ball_mask]
         non_ball_labels = [l for l, m in zip(labels, (~ball_mask).tolist()) if m]
 
         annotated = frame.copy()
@@ -263,7 +217,6 @@ def run(input_path: Path, output_path: Path, conf: float,
     writer.release()
 
     print(f"\n{'='*45}")
-    print(f"Modo inferencia       : {'LOCAL' if USE_LOCAL_MODEL else 'API'}")
     print(f"Frames procesados     : {frame_idx}")
     print(f"Balón detectado       : {ball_detected}/{frame_idx} frames")
     print(f"Balón interpolado     : {ball_filled} frames adicionales")

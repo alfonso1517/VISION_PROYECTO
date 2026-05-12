@@ -22,9 +22,12 @@ TARGET_PROJECT = "football-tactical"
 
 # Slugs reales (verificados via API)
 SOURCE_PROJECTS = {
-    "football-player-nnajt-68w3v":          "Football PLayer (805)",
-    "football-player-jrjtj-urpir":           "football-player (664)",
+    "football-player-nnajt-68w3v":           "Football PLayer (805)",
+    "football-player-jrjtj-urpir":            "football-player (664)",
     "football-players-detection-3zvbc-pcts8": "football-players-detection (372)",
+    "football-ball-detection-rejhg-r1kak":    "football-ball-detection (1237)",
+    "football-tracking-dyjjm-qweas":          "football-tracking (663)",
+    "football-video-tracking-project-yjknb":  "football-video-tracking-project (663)",
 }
 
 # psg/bar son etiquetas de equipo en el dataset de 664 imgs → se normalizan a player
@@ -35,6 +38,12 @@ CLASS_MAP = {
     "goalkeeper": "goalkeeper",
     "referee":    "referee",
     "ball":       "ball",
+}
+
+# football-tracking tiene data.yaml corrupto; las clases reales se deducen
+# por distribución de etiquetas: 0=ball(473), 1=goalkeeper(1519), 2=player(13241), 3=referee(565)
+CLASS_OVERRIDES = {
+    "football-tracking-dyjjm-qweas": ["ball", "goalkeeper", "player", "referee"],
 }
 UNIFIED_CLASSES = ["player", "goalkeeper", "referee", "ball"]
 
@@ -93,7 +102,7 @@ def merge_datasets() -> None:
             continue
 
         meta       = yaml.safe_load(yaml_files[0].read_text())
-        src_classes = meta.get("names", [])
+        src_classes = CLASS_OVERRIDES.get(slug, meta.get("names", []))
         base       = yaml_files[0].parent
         prefix     = slug[:8]           # prefijo para evitar colisiones de nombre
 
