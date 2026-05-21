@@ -59,7 +59,7 @@ CUT_THRESHOLD = 30.0      # diff.mean() a partir del cual se considera corte de 
 
 # ── Parámetros ByteTrack ──────────────────────────────────────────────────────
 BT_ACTIVATION_THRESH = 0.25
-BT_LOST_BUFFER       = 60
+BT_LOST_BUFFER       = 90
 BT_MATCH_THRESH      = 0.8
 
 # ── Re-ID por apariencia ──────────────────────────────────────────────────────

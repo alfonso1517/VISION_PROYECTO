@@ -33,7 +33,7 @@ class TeamClassifierKMeans:
     def __init__(self, **kwargs):
         self.kmeans     = None
         self._fitted    = False
-        self._cache:     dict[int, int]        = {}  # track_id → team_id
+        self._cache:     dict[int, int]        = {}  # track_id → team_id (permanente)
         self._emb_cache: dict[int, np.ndarray] = {}  # color 3D (compat. Re-ID)
 
     # ------------------------------------------------------------------
@@ -98,7 +98,7 @@ class TeamClassifierKMeans:
 
     # ------------------------------------------------------------------
     def get_team(self, crop: np.ndarray, track_id: int) -> int:
-        """Devuelve team_id (0 ó 1). Cacheado por track_id."""
+        """Devuelve team_id (0 ó 1). Primera asignación permanente — no recalcula."""
         if track_id in self._cache:
             return self._cache[track_id]
         if not self._fitted:

@@ -1,9 +1,0 @@
-names:
-- player
-- goalkeeper
-- referee
-- ball
-nc: 4
-test: /home/fonso/mlmuia/mlmuia/VISION_PROYECTO/data/dataset/merged/test/images
-train: /home/fonso/mlmuia/mlmuia/VISION_PROYECTO/data/dataset/merged/train/images
-val: /home/fonso/mlmuia/mlmuia/VISION_PROYECTO/data/dataset/merged/valid/images
