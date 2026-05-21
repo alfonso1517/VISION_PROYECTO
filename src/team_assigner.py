@@ -14,6 +14,7 @@ Restricción de cardinalidad:
   - Árbitros y porteros no cuentan para el límite (se gestionan en track.py)
 """
 
+from collections import deque
 from typing import List
 
 import numpy as np
@@ -26,6 +27,7 @@ import supervision as sv
 
 SIGLIP_MODEL_PATH = "google/siglip-base-patch16-224"
 MAX_TEAM_SIZE     = 13   # margen: 11 titulares + 2 re-IDs por equipo por frame
+HISTORY_LEN       = 10   # frames de historial para suavizado temporal
 
 
 def _get_device() -> str:
@@ -51,11 +53,15 @@ class TeamClassifier:
             SIGLIP_MODEL_PATH
         ).to(self.device)
         self.processor = AutoProcessor.from_pretrained(SIGLIP_MODEL_PATH)
-        self.reducer = umap.UMAP(n_components=3)
+        self.reducer = None   # se instancia en fit() con n_neighbors adaptado al nº de muestras
         self.cluster_model = KMeans(n_clusters=2)
-        self._fitted = False
-        self._cache: dict[int, int] = {}        # track_id → team_id
-        self._proj_cache: dict[int, np.ndarray] = {}  # track_id → UMAP projection
+        self._fitted       = False
+        self._dist_p75     = float("inf")                    # umbral de confianza del cluster
+        self._cache:          dict[int, int]        = {}     # track_id → equipo actual (mayoría)
+        self._proj_cache:     dict[int, np.ndarray] = {}     # track_id → UMAP projection 3D
+        self._emb_cache:      dict[int, np.ndarray] = {}     # track_id → SigLIP embedding 768D
+        self._history:        dict[int, deque]      = {}     # track_id → últimas N asignaciones
+        self._last_confident: dict[int, int]        = {}     # track_id → última asig. confiable
 
     # ------------------------------------------------------------------
     def _extract_features(self, crops: List[np.ndarray]) -> np.ndarray:
@@ -82,28 +88,56 @@ class TeamClassifier:
             return
         print(f"  [TeamClassifier] Fit con {len(crops)} crops...")
         data = self._extract_features(crops)
+        n_neighbors = min(len(crops) - 1, 15)
+        self.reducer = umap.UMAP(n_components=3, n_neighbors=n_neighbors, random_state=42)
         projections = self.reducer.fit_transform(data)
         self.cluster_model.fit(projections)
+
+        # Percentil 75 de distancias al centroide → umbral de confianza del cluster
+        distances = [
+            float(np.linalg.norm(proj - self.cluster_model.cluster_centers_[label]))
+            for proj, label in zip(projections, self.cluster_model.labels_)
+        ]
+        self._dist_p75 = float(np.percentile(distances, 75))
+
         self._fitted = True
-        print("  [TeamClassifier] Fit completado.")
+        print(f"  [TeamClassifier] Fit completado. Umbral confianza p75={self._dist_p75:.4f}")
 
     # ------------------------------------------------------------------
     def get_team(self, crop: np.ndarray, track_id: int) -> int:
         """
-        Devuelve team_id (0 ó 1). Cacheado por track_id.
-        SigLIP solo corre para IDs nuevos.
+        Devuelve team_id (0 ó 1) con confianza de cluster y suavizado temporal.
+        SigLIP solo corre para track_ids nuevos; el resto usa la proyección cacheada.
         """
-        if track_id in self._cache:
-            return self._cache[track_id]
         if not self._fitted:
             return 0
 
-        data = self._extract_features([crop])
-        proj = self.reducer.transform(data)[0]
-        team_id = int(self.cluster_model.predict(proj[None])[0])
-        self._cache[track_id] = team_id
-        self._proj_cache[track_id] = proj
-        return team_id
+        # SigLIP + UMAP: solo para track_ids nuevos (caro)
+        if track_id not in self._proj_cache:
+            data = self._extract_features([crop])
+            self._emb_cache[track_id] = data[0]
+            proj = self.reducer.transform(data)[0]
+            self._proj_cache[track_id] = proj
+
+        proj     = self._proj_cache[track_id]
+        raw_team = int(self.cluster_model.predict(proj[None])[0])
+        dist     = float(np.linalg.norm(proj - self.cluster_model.cluster_centers_[raw_team]))
+
+        # ── Confianza del cluster ─────────────────────────────────────────────
+        if dist > self._dist_p75 and track_id in self._last_confident:
+            vote = self._last_confident[track_id]
+        else:
+            vote = raw_team
+            self._last_confident[track_id] = raw_team
+
+        # ── Suavizado temporal por mayoría ────────────────────────────────────
+        if track_id not in self._history:
+            self._history[track_id] = deque(maxlen=HISTORY_LEN)
+        self._history[track_id].append(vote)
+
+        majority = max(set(self._history[track_id]), key=self._history[track_id].count)
+        self._cache[track_id] = majority
+        return majority
 
     # ------------------------------------------------------------------
     def get_team_with_limit(
