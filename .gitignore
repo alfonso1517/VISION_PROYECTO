@@ -18,9 +18,9 @@ models/weights/
 runs/
 yolov8m.pt
 
-# Outputs (vídeos generados)
+# Outputs (vídeos y CSVs generados — demasiado grandes)
 outputs/tracked_videos/
-outputs/metrics/
+outputs/metrics/*.csv
 
 # Jupyter
 .ipynb_checkpoints/

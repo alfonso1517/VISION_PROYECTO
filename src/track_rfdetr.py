@@ -192,7 +192,8 @@ def reassign_ids_by_appearance(
 # ── Pipeline principal ────────────────────────────────────────────────────────
 
 def run(input_path: Path, output_path: Path, conf: float,
-        max_frames: int = 0, start_sec: int = 0, assigner: str = "siglip") -> None:
+        max_frames: int = 0, start_sec: int = 0, assigner: str = "siglip",
+        no_video: bool = False) -> None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model  = _load_rfdetr(device)
@@ -216,9 +217,12 @@ def run(input_path: Path, output_path: Path, conf: float,
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_sec * fps))
 
     limit = max_frames if max_frames else (total - int(start_sec * fps))
-    print(f"Pasada 1/2 — inferencia ({limit} frames desde seg {start_sec})...")
+    pasadas = "1/1 (solo CSV)" if no_video else "1/2"
+    print(f"Pasada {pasadas} — inferencia ({limit} frames desde seg {start_sec})...")
+    if no_video:
+        print("  Modo --no-video: sin renderizado, máxima velocidad.")
 
-    frames_buf: list[np.ndarray]        = []
+    frames_buf: list[np.ndarray]        = []  # vacío si no_video=True
     detections_buf: list[sv.Detections] = []
     team_buf: list[dict[int, int]]      = []
     disp_buf: list[dict[int, int]]      = []
@@ -314,7 +318,8 @@ def run(input_path: Path, output_path: Path, conf: float,
                 break
         ball_bboxes.append(ball_bbox)
 
-        frames_buf.append(frame)
+        if not no_video:
+            frames_buf.append(frame)   # solo buffear frame si hay que renderizar
         detections_buf.append(detections)
         team_buf.append(frame_teams)
         disp_buf.append(frame_display)
@@ -330,6 +335,35 @@ def run(input_path: Path, output_path: Path, conf: float,
     ball_interp   = interpolate_ball(ball_bboxes)
     ball_detected = sum(1 for b in ball_bboxes if b is not None)
     ball_filled   = sum(1 for b in ball_interp if b is not None) - ball_detected
+
+    # ── Modo CSV-only: generar CSV sin renderizar vídeo ──────────────────────
+    if no_video:
+        csv_rows: list[dict] = []
+        ball_detected = sum(1 for b in ball_bboxes if b is not None)
+        for i, (detections, frame_teams, frame_display) in enumerate(
+            zip(detections_buf, team_buf, disp_buf)
+        ):
+            classes = detections.data.get("class_name", np.array([]))
+            for j, cls in enumerate(classes):
+                raw_tid = int(detections.tracker_id[j]) if detections.tracker_id is not None else -1
+                disp_id = frame_display.get(raw_tid, raw_tid)
+                team_id = frame_teams.get(raw_tid, -1) if cls == "player" else -1
+                x1, y1, x2, y2 = detections.xyxy[j]
+                conf_val = float(detections.confidence[j]) if detections.confidence is not None else 0.0
+                csv_rows.append({
+                    "frame": i, "track_id": disp_id, "class": cls, "team_id": team_id,
+                    "x1": round(float(x1), 1), "y1": round(float(y1), 1),
+                    "x2": round(float(x2), 1), "y2": round(float(y2), 1),
+                    "confidence": round(conf_val, 4),
+                })
+            if (i + 1) % 5000 == 0:
+                print(f"  CSV: {i+1}/{len(detections_buf)} frames escritos...")
+        csv_path = Path("outputs/metrics") / (output_path.stem + "_tracks.csv")
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(csv_rows).to_csv(csv_path, index=False)
+        print(f"\nCSV guardado en: {csv_path}  ({len(csv_rows)} filas)")
+        print(f"Frames procesados : {frame_idx}  |  Balón detectado: {ball_detected} frames")
+        return
 
     print(f"Pasada 2/2 — renderizando → {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -350,6 +384,7 @@ def run(input_path: Path, output_path: Path, conf: float,
     )
 
     team_counts: dict[int, set] = defaultdict(set)
+    csv_rows: list[dict] = []
 
     for i, (frame, detections) in enumerate(zip(frames_buf, detections_buf)):
         ball_bbox = ball_interp[i]
@@ -407,6 +442,20 @@ def run(input_path: Path, output_path: Path, conf: float,
             if best_j is not None:
                 possession_det = detections[[best_j]]
 
+        # Acumular filas CSV
+        for j, cls in enumerate(classes):
+            raw_tid = int(detections.tracker_id[j]) if detections.tracker_id is not None else -1
+            disp_id = frame_display.get(raw_tid, raw_tid)
+            team_id = frame_teams.get(raw_tid, -1) if cls == "player" else -1
+            x1, y1, x2, y2 = detections.xyxy[j]
+            conf = float(detections.confidence[j]) if detections.confidence is not None else 0.0
+            csv_rows.append({
+                "frame": i, "track_id": disp_id, "class": cls, "team_id": team_id,
+                "x1": round(float(x1), 1), "y1": round(float(y1), 1),
+                "x2": round(float(x2), 1), "y2": round(float(y2), 1),
+                "confidence": round(conf, 4),
+            })
+
         annotated = frame.copy()
         if len(non_ball_det) > 0:
             annotated = ellipse_ann.annotate(scene=annotated, detections=non_ball_det)
@@ -419,6 +468,12 @@ def run(input_path: Path, output_path: Path, conf: float,
         writer.write(annotated)
 
     writer.release()
+
+    # Guardar CSV
+    csv_path = Path("outputs/metrics") / (output_path.stem + "_tracks.csv")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(csv_rows).to_csv(csv_path, index=False)
+    print(f"CSV de tracks guardado en: {csv_path}")
 
     total_ids = len(team_counts[0]) + len(team_counts[1])
     print(f"\n{'='*50}")
@@ -444,8 +499,11 @@ if __name__ == "__main__":
     parser.add_argument("--conf",       type=float, default=CONF_THRESH)
     parser.add_argument("--max-frames", type=int,   default=0)
     parser.add_argument("--start-sec",  type=int,   default=0)
+    parser.add_argument("--no-video",   action="store_true",
+                        help="Solo genera el CSV sin renderizar vídeo (mucho más rápido y sin coste de RAM de frames)")
     parser.add_argument("--assigner",   type=str,   default="siglip",
                         choices=["siglip", "kmeans"],
                         help="Clasificador de equipos: siglip (SigLIP+UMAP+KMeans) o kmeans (píxeles)")
     args = parser.parse_args()
-    run(args.input, args.output, args.conf, args.max_frames, args.start_sec, args.assigner)
+    run(args.input, args.output, args.conf, args.max_frames, args.start_sec, args.assigner,
+        no_video=args.no_video)

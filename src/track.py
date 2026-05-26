@@ -408,6 +408,7 @@ def run(input_path: Path, output_path: Path, conf: float,
     )
 
     team_counts: dict[int, set] = defaultdict(set)
+    csv_rows: list[dict] = []
 
     for i, (frame, detections) in enumerate(zip(frames_buf, detections_buf)):
         # Aplica balón interpolado
@@ -445,6 +446,23 @@ def run(input_path: Path, output_path: Path, conf: float,
                 labels.append(f"#{disp_id}")
 
         detections.class_id = new_class_ids
+
+        # ── Acumular filas para CSV ───────────────────────────────────────────
+        if detections.tracker_id is not None:
+            for j, cls in enumerate(classes):
+                raw_tid = int(detections.tracker_id[j])
+                team_id = frame_teams.get(raw_tid, -1) if cls == "player" else -1
+                x1, y1, x2, y2 = detections.xyxy[j]
+                conf = float(detections.confidence[j]) if detections.confidence is not None else -1.0
+                csv_rows.append({
+                    "frame":      i,
+                    "track_id":   frame_display.get(raw_tid, raw_tid),
+                    "class":      cls,
+                    "team_id":    team_id,
+                    "x1": round(float(x1), 1), "y1": round(float(y1), 1),
+                    "x2": round(float(x2), 1), "y2": round(float(y2), 1),
+                    "confidence": round(conf, 4),
+                })
 
         ball_mask       = np.array([c == "ball" for c in classes], dtype=bool)
         non_ball_det    = detections[~ball_mask]
@@ -485,6 +503,14 @@ def run(input_path: Path, output_path: Path, conf: float,
         writer.write(annotated)
 
     writer.release()
+
+    # ── Guardar CSV de tracks ─────────────────────────────────────────────────
+    if csv_rows:
+        csv_dir = Path("outputs/metrics")
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = csv_dir / (output_path.stem + "_tracks.csv")
+        pd.DataFrame(csv_rows).to_csv(csv_path, index=False)
+        print(f"\nCSV de tracks guardado en: {csv_path}")
 
     print(f"\n{'='*45}")
     print(f"Modo inferencia       : {'LOCAL' if USE_LOCAL_MODEL else 'API'}")
